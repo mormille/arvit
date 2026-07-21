@@ -1,0 +1,99 @@
+name: Phase 3 historical import
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/phase3-import.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-history:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPOSITORY: mormille/self-attention-regularization
+      SOURCE_COMMIT: 9f294c2a19fb855dd6230d6fcb38607e36fcac7e
+      IMPORT_BRANCH: migration/phase-3-historical-import
+      ARCHIVE_TAG: v0.1.0-research-archive
+      GIT_LFS_SKIP_SMUDGE: "1"
+    steps:
+      - name: Clone frozen source history
+        run: |
+          git clone --no-tags "https://github.com/${SOURCE_REPOSITORY}.git" source
+          cd source
+          git branch phase3-source "${SOURCE_COMMIT}"
+
+      - name: Install git-filter-repo
+        run: python -m pip install --disable-pip-version-check git-filter-repo
+
+      - name: Filter historical ARViT source variants
+        working-directory: source
+        run: |
+          git filter-repo \
+            --refs phase3-source \
+            --path distance_based/ARViT2D/ \
+            --path-rename distance_based/ARViT2D/:legacy_sources/distance_based/ARViT2D/ \
+            --path region_similarity_based/ARViT/ \
+            --path-rename region_similarity_based/ARViT/:legacy_sources/region_similarity_based/ARViT/ \
+            --force
+          git checkout phase3-source
+
+      - name: Attach filtered history to target baseline
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          target_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote add target "${target_url}"
+          git fetch target main
+          filtered_head=$(git rev-parse HEAD)
+          target_main=$(git rev-parse target/main)
+          filtered_tree=$(git rev-parse "${filtered_head}^{tree}")
+          import_commit=$(printf '%s\n' \
+            'chore: attach filtered historical ARViT sources' \
+            '' \
+            "Source repository: ${SOURCE_REPOSITORY}" \
+            "Source commit: ${SOURCE_COMMIT}" \
+            'Filtered paths: distance_based/ARViT2D/ and region_similarity_based/ARViT/' \
+            | git commit-tree "${filtered_tree}" -p "${target_main}" -p "${filtered_head}")
+          git checkout -B "${IMPORT_BRANCH}" "${import_commit}"
+          git tag -f -a "${ARCHIVE_TAG}" "${import_commit}" -m "Historical ARViT source variants from ${SOURCE_COMMIT}"
+
+      - name: Add import provenance
+        working-directory: source
+        run: |
+          cat > HISTORICAL_IMPORT.md <<'EOF'
+          # Historical import provenance
+
+          No standalone regularizer-free ARViT package existed in the frozen source repository. This branch therefore preserves both principal historical model-source variants without silently combining them:
+
+          - `legacy_sources/distance_based/ARViT2D/`
+          - `legacy_sources/region_similarity_based/ARViT/`
+
+          Source information:
+
+          - source repository: `mormille/self-attention-regularization`
+          - frozen source commit: `9f294c2a19fb855dd6230d6fcb38607e36fcac7e`
+          - archive tag: `v0.1.0-research-archive`
+
+          The region/SAM ARViT model copies were identified as equivalent during the Phase 1 audit, so the region copy is retained here as their representative historical source. The archive tag points to the exact filtered snapshot before this provenance file was added.
+
+          ## Status
+
+          This is a historical source baseline, not yet the canonical reusable ARViT package. The two variants retain method-specific dependencies and are not being presented as a clean standalone architecture. Construction of the regularizer-free package belongs to Phase 5.
+
+          Original commit authorship and dates are retained in the filtered history. The additional attachment and provenance commits were created solely to connect the imported history to this target repository.
+          EOF
+          git add HISTORICAL_IMPORT.md
+          git commit -m "docs: record historical ARViT source provenance"
+
+      - name: Push migration branch and archive tag
+        working-directory: source
+        run: |
+          git push --force target "HEAD:refs/heads/${IMPORT_BRANCH}"
+          git push --force target "refs/tags/${ARCHIVE_TAG}"
